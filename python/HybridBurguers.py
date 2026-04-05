@@ -16,13 +16,15 @@ dx = 1/15
 dt = 0.001
 nu = 0.01 / np.pi
 
-mn = 0.0  #Numerical hyoerviscosity c
+# Numerical hyperviscosity
+mn = 0.01
+use_flux_hypervisc = True  # Set to False to use simple formulation for debugging
 
-use_flux_hypervisc = True
-
+# Plot timestep
 T_frames = 100 # x0.001 sec
 steps_per_frame = 10
 
+# Domain
 x = np.linspace(L_min, L_max, nx)
 
 # Initial condition
@@ -52,14 +54,14 @@ b3 = (38*a3 - 9)/214
 a3_tilde = (696 - 1191*a3)/428
 b3_tilde = (1227*a3 - 147)/1070
 
-# --- Build B matrix ---
+# Build B matrix 
 B_lil = sp.diags(
     [-b2/dx, -a2/dx, a2/dx, b2/dx],
     [-2, -1, 1, 2],
     shape=(nx, nx)
 ).tolil()
 
-# periodic wrap
+# Periodic wrap
 B_lil[0, -1] = -a2/dx
 B_lil[0, -2] = -b2/dx
 B_lil[1, -1] = -b2/dx
@@ -70,7 +72,7 @@ B_lil[-1, 1] = b2/dx
 
 B = B_lil.tocsc()
 
-# --- Build C matrix ---
+# Build C matrix
 C_lil = sp.diags([b3, a3, 1.0, a3, b3], [-2, -1, 0, 1, 2], shape=(nx, nx)).tolil()
 
 C_lil[0, -1] = a3
@@ -83,7 +85,7 @@ C_lil[-1, 1] = b3
 C = C_lil.tocsc()
 solve_C = spla.factorized(C)
 
-# --- Build D matrix ---
+# Build D matrix
 D_lil = sp.diags(
     [b3_tilde/dx**2, a3_tilde/dx**2, -2*(a3_tilde + b3_tilde)/dx**2,
      a3_tilde/dx**2, b3_tilde/dx**2],
@@ -91,7 +93,7 @@ D_lil = sp.diags(
     shape=(nx, nx)
 ).tolil()
 
-# periodic wrap
+# Periodic wrap
 D_lil[0, -1] = a3_tilde/dx**2
 D_lil[0, -2] = b3_tilde/dx**2
 D_lil[1, -1] = b3_tilde/dx**2
@@ -164,7 +166,7 @@ def get_weno7_interface_flux(u):
     fp = 0.5 * (f + alpha * u)  # Positive moving flux
     fm = 0.5 * (f - alpha * u)  # Negative moving flux
     
-    # --- Positive Flux (F^+_{i+1/2}) ---
+    # Positive Flux (F^+_{i+1/2})
     v1_p = np.roll(fp, 3)   # i-3
     v2_p = np.roll(fp, 2)   # i-2
     v3_p = np.roll(fp, 1)   # i-1
@@ -174,7 +176,7 @@ def get_weno7_interface_flux(u):
     v7_p = np.roll(fp, -3)  # i+3
     fp_half = weno7_flux(v1_p, v2_p, v3_p, v4_p, v5_p, v6_p, v7_p)
     
-    # --- Negative Flux (F^-_{i+1/2}) ---
+    # Negative Flux (F^-_{i+1/2})
     v1_m = np.roll(fm, -4)  # i+4
     v2_m = np.roll(fm, -3)  # i+3
     v3_m = np.roll(fm, -2)  # i+2
@@ -187,53 +189,96 @@ def get_weno7_interface_flux(u):
     return fp_half + fm_half
 
 # ------------------------------------------------------------
-# Hyperviscosity
+# Hyperviscosity - Wang et al. 2010 Implementation
+# Equation 55: df/dt = other terms + m_n[f''_n - (f'_n)'_n]
+# With shock-switch from Eq. 63
 # ------------------------------------------------------------
 
+def hyperviscosity_simplifed(u, shock_region):
+    """
+    Direct implementation of hyperviscosity.
+    Term: m_n[u_xx - (u_x)_x] with shock switching.
+    """
+    # Compute first derivative u_x using implicit operator
+    u_x = solve_A(B @ u)
+    
+    # Compute second derivative two ways:
+    # u_xx: direct second derivative
+    u_xx = solve_C(D @ u)
+    
+    # (u_x)_x: derivative of derivative (via implicit operator)
+    u_x_x = solve_A(B @ u_x)
+    
+    # Base hyperviscosity term (dissipative)
+    hypervisc = u_xx - u_x_x
+    
+    # Apply shock switch: zero out in shock regions
+    hypervisc[shock_region] = 0.0
+    
+    return hypervisc
+
+
 def hyperviscosity_flux(u, shock_region):
-    # coefficients
+    """
+    Flux-conservative formulation with shock switch.
+    Implements the decomposition from Eq. 60-63 of Wang et al. 2010.
+    Computes: m_n[F''_n - (F'_n)'_n] with shock-aware switching.
+    """
+    # Coefficients from compact schemes
     a2 = 4/9
     b2 = 1/36
-
     a3 = 344/1179
     b3 = (38*a3 - 9)/214
     a3_t = (696 - 1191*a3)/428
     b3_t = (1227*a3 - 147)/1070
-
-    # --- Step 1: u_x ---
+    
+    # Compute first derivative u_x
     u_x = solve_A(B @ u)
-
-    # --- Step 2: G_{j+1/2} ---
-    G = (
-        b2/dx * np.roll(u_x, 1) +
-        (a2 + b2)/dx * u_x +
-        (a2 + b2)/dx * np.roll(u_x, -1) +
-        b2/dx * np.roll(u_x, -2)
+    
+    # Compute u_xx directly
+    u_xx = solve_C(D @ u)
+    
+    # Compute (u_x)_x using the same implicit compact scheme 
+    u_x_x = solve_A(B @ u_x)
+    
+    # Build the flux G_{j+1/2} = B^{+1/2} * u_x 
+    # B^{+1/2} is tetra-diagonal with entries [b2/h, (a2+b2)/h, (a2+b2)/h, b2/h]
+    # This amounts to evaluating u_x at the j+1/2 interfaces
+    G_half = (
+        (b2/dx) * np.roll(u_x, 1) + 
+        ((a2 + b2)/dx) * u_x + 
+        ((a2 + b2)/dx) * np.roll(u_x, -1) + 
+        (b2/dx) * np.roll(u_x, -2)
     )
-
-    # --- Step 3: H_{j+1/2} ---
-    H_raw = (
-        b3_t/dx**2 * np.roll(u, 1) +
-        (a3_t + b3_t)/dx**2 * u +
-        (a3_t + b3_t)/dx**2 * np.roll(u, -1) +
-        b3_t/dx**2 * np.roll(u, -2)
+    
+    # Build the flux H_{j+1/2} = A * C^{-1} * D^{+1/2} * u 
+    # D^{+1/2} is tetra-diagonal with same structure
+    D_half_u = (
+        (b3_t/dx**2) * np.roll(u, 1) +
+        ((a3_t + b3_t)/dx**2) * u +
+        ((a3_t + b3_t)/dx**2) * np.roll(u, -1) +
+        (b3_t/dx**2) * np.roll(u, -2)
     )
-
-    H = solve_A(H_raw)
-
-    # --- Step 4: switching ---
-    G_mod = np.copy(G)
-
-    is_shock_edge = shock_region | np.roll(shock_region, -1)
-    is_smooth_edge = (~shock_region) & (~np.roll(shock_region, -1))
-    is_joint_edge = ~(is_shock_edge | is_smooth_edge)
-
-    G_mod[is_smooth_edge] = G[is_smooth_edge]
-    G_mod[is_shock_edge]  = H[is_shock_edge]
-    G_mod[is_joint_edge]  = 0.5 * (G[is_joint_edge] + H[is_joint_edge])
-
-    # --- Step 5: divergence ---
-    return (G_mod - np.roll(G_mod, 1)) / dx
+    # H = A * C^{-1} * D^{+1/2} * u
+    H_half = solve_A(A_csc @ solve_C(D_half_u))
+    
+    # Apply shock switch from Eq. 63
+    G_modified = np.copy(G_half)
+    
+    # Identify edge types: smoothness on both sides vs shock on one/both sides
+    smooth_both = (~shock_region) & (~np.roll(shock_region, -1))
+    shock_both = shock_region & np.roll(shock_region, -1)
+    mixed = ~(smooth_both | shock_both)  # Joint edges
+    
+    # Apply the switch: use G in smooth regions, H in shock regions, average at joints
+    G_modified[smooth_both] = G_half[smooth_both]
+    G_modified[shock_both] = H_half[shock_both]
+    G_modified[mixed] = 0.5 * (G_half[mixed] + H_half[mixed])
+    
+    #  Compute flux divergence: (G_{j+1/2} - G_{j-1/2})/dx 
+    flux_div = (G_modified - np.roll(G_modified, 1)) / dx
+    
+    return flux_div
 
 # ------------------------------------------------------------
 # 3. Hybrid RHS Evaluation
@@ -241,12 +286,13 @@ def hyperviscosity_flux(u, shock_region):
 def RHS_hybrid(u):
     global current_shock_region  # Store for coloring the plot
     
-    # --- Step A: Shock Detection (Eq. based on local dilatation) ---
+    # Step A: Shock Detection (based on local dilatation)
     theta = (np.roll(u, -1) - np.roll(u, 1)) / (2 * dx)  # Velocity gradient
     theta_rms = np.sqrt(np.mean(theta**2))
+    # Sensor at velocity gradient x3 the velocity root mean square
     is_shock_node = theta < -3.0 * theta_rms
     
-    # Dilate the shock region by 3 points in each direction
+    # Dilate the shock region by 3 points in each direction to get stencil
     shock_region = np.copy(is_shock_node)
     for k in range(1, 4):
         shock_region |= np.roll(is_shock_node, k)
@@ -254,7 +300,7 @@ def RHS_hybrid(u):
         
     current_shock_region = shock_region  # Save for animation colors
     
-    # --- Step B: 8th-Order Compact FD Flux (Eq. 25) ---
+    # Step B: 8th-Order Compact FD Flux (Eq. 25)
     f = 0.5 * u**2
     a1_c = 25/32; b1_c = 1/20; c1_c = -1/480
     
@@ -262,12 +308,12 @@ def RHS_hybrid(u):
               (b1_c + c1_c) * (np.roll(f, -2) + np.roll(f, 1)) +
               (a1_c + b1_c + c1_c) * (np.roll(f, -1) + f))
               
-    # --- Step C: Consistent WENO Flux (Eq. 28) ---
+    # Step C: Consistent WENO Flux (Eq. 28)
     # Using the new WENO-7 interface flux calculation
     F_weno_raw = get_weno7_interface_flux(u)
     F_weno_hat = alpha1 * np.roll(F_weno_raw, -1) + F_weno_raw + alpha1 * np.roll(F_weno_raw, 1)
     
-    # --- Step D: Hybrid Flux Blending (Eq. 30) ---
+    # Step D: Hybrid Flux Blending (Eq. 30)
     F_hybrid = np.zeros_like(u)
     
     # Determine edge types (between j and j+1)
@@ -279,27 +325,30 @@ def RHS_hybrid(u):
     F_hybrid[is_shock_edge]  = F_weno_hat[is_shock_edge]
     F_hybrid[is_joint_edge]  = 0.5 * (F_comp[is_joint_edge] + F_weno_hat[is_joint_edge])
     
-    # --- Step E: Solve Implicit System for Advection ---
+    # Step E: Solve Implicit System for Advection
     R = (F_hybrid - np.roll(F_hybrid, 1)) / dx
     advection = solve_A(R)
     
-    # --- Step F: Viscous Term (8th-Order Central) ---
+    # Step F: Viscous Term (8th-Order Central)
     diffusion = nu * ( -(1/560)*np.roll(u,-4) + (8/315)*np.roll(u,-3)
                        - (1/5)*np.roll(u,-2) + (8/5)*np.roll(u,-1)
                        - (205/72)*u
                        + (8/5)*np.roll(u,1) - (1/5)*np.roll(u,2)
                        + (8/315)*np.roll(u,3) - (1/560)*np.roll(u,4) ) / dx**2
 
-    # --- Step G: Numerical Hyperviscosity ---
-    if use_flux_hypervisc:
-        hypervisc = mn * hyperviscosity_flux(u, shock_region)
-    else:
-        # old version
-        u_x = solve_A(B @ u)
-        u_xx_indirect = solve_A(B @ u_x)
-        u_xx_direct = solve_C(D @ u)
-        hypervisc = mn * (u_xx_direct - u_xx_indirect)
-        hypervisc[shock_region] = 0.0
+    # Step G: Numerical Hyperviscosity
+    # Direct simple formulation from Eq. 55: m_n[u_xx - (u_x)_x] with shock suppression
+    # Compute first derivative u_x
+    u_x = solve_A(B @ u)
+    
+    # Compute second derivative two ways and combine
+    u_xx = solve_C(D @ u)         # Direct second derivative
+    u_x_x = solve_A(B @ u_x)      # Derivative of derivative
+    
+    # The hyperviscosity term (should be dissipative)
+    hypervisc_term = u_xx - u_x_x
+    hypervisc_term[shock_region] = 0.0  # Zero out in shock regions
+    hypervisc = mn * hypervisc_term
                        
     return -advection + diffusion + hypervisc
 

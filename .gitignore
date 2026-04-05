@@ -7,7 +7,9 @@ env/
 __pycache__/
 *.pyc
 
-
+# MATLAB cache and temporary files
+*.asv        # Autosave files
+*.m~         # Backup files
 
 # Environment variables
 .env
