@@ -1,176 +1,6 @@
-# %%
+
 # ============================================================
-# SECTION 6 — Animated WENO-5 vs Analytical (Viscous Burgers)
-# ============================================================
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from numpy.polynomial.hermite import hermgauss
-
-# Parameters
-L_min, L_max = -1.0, 1.0
-#nx = 101
-#dx = (L_max - L_min) / (nx - 1)
-nx = 31
-dx = 1/15
-dt = 0.001
-nu = 0.01 / np.pi
-
-T_frames = 50
-steps_per_frame = 10
-
-x = np.linspace(L_min, L_max, nx)
-
-# Initial condition
-u_initial = -np.sin(np.pi * x)
-u = u_initial.copy()
-
-# ------------------------------------------------------------
-# 5th-Order WENO Advection Scheme
-# ------------------------------------------------------------
-def weno5_flux(v1, v2, v3, v4, v5):
-    """Computes the 5th-order WENO flux interpolation."""
-    eps = 1e-6
-    
-    # 3rd-order polynomial reconstructions
-    q0 = (1/3)*v1 - (7/6)*v2 + (11/6)*v3
-    q1 = -(1/6)*v2 + (5/6)*v3 + (1/3)*v4
-    q2 = (1/3)*v3 + (5/6)*v4 - (1/6)*v5
-    
-    # Smoothness indicators (measure of local gradients)
-    IS0 = (13/12)*(v1 - 2*v2 + v3)**2 + (1/4)*(v1 - 4*v2 + 3*v3)**2
-    IS1 = (13/12)*(v2 - 2*v3 + v4)**2 + (1/4)*(v2 - v4)**2
-    IS2 = (13/12)*(v3 - 2*v4 + v5)**2 + (1/4)*(3*v3 - 4*v4 + v5)**2
-    
-    # Optimal linear weights
-    d0, d1, d2 = 0.1, 0.6, 0.3
-    
-    # Unnormalized non-linear weights
-    alpha0 = d0 / (eps + IS0)**2
-    alpha1 = d1 / (eps + IS1)**2
-    alpha2 = d2 / (eps + IS2)**2
-    
-    # Normalized WENO weights
-    sum_alpha = alpha0 + alpha1 + alpha2
-    w0 = alpha0 / sum_alpha
-    w1 = alpha1 / sum_alpha
-    w2 = alpha2 / sum_alpha
-    
-    return w0*q0 + w1*q1 + w2*q2
-
-def get_weno_derivative(u):
-    """Computes the spatial derivative of the flux using Lax-Friedrichs splitting."""
-    f = 0.5 * u**2
-    alpha = np.max(np.abs(u)) # Maximum local wave speed
-    
-    # Lax-Friedrichs Flux Splitting
-    fp = 0.5 * (f + alpha * u)  # Positive moving flux
-    fm = 0.5 * (f - alpha * u)  # Negative moving flux
-    
-    # --- Positive Flux (F^+_{i+1/2}) ---
-    # Stencil leans to the left
-    v1_p = np.roll(fp, 2)   # i-2
-    v2_p = np.roll(fp, 1)   # i-1
-    v3_p = fp               # i
-    v4_p = np.roll(fp, -1)  # i+1
-    v5_p = np.roll(fp, -2)  # i+2
-    fp_half = weno5_flux(v1_p, v2_p, v3_p, v4_p, v5_p)
-    
-    # --- Negative Flux (F^-_{i+1/2}) ---
-    # Stencil leans to the right (indices mirrored)
-    v1_m = np.roll(fm, -3)  # i+3
-    v2_m = np.roll(fm, -2)  # i+2
-    v3_m = np.roll(fm, -1)  # i+1
-    v4_m = fm               # i
-    v5_m = np.roll(fm, 1)   # i-1
-    fm_half = weno5_flux(v1_m, v2_m, v3_m, v4_m, v5_m)
-    
-    # Total interface flux F_{i+1/2}
-    F_half = fp_half + fm_half
-    
-    # F_{i-1/2} is just F_{i+1/2} shifted to the right by 1 cell
-    F_half_shifted = np.roll(F_half, 1)
-    
-    # Return df/dx
-    return (F_half - F_half_shifted) / dx
-
-# ------------------------------------------------------------
-# 8th-Order Central Scheme for Viscous Term
-# ------------------------------------------------------------
-def d2(u):
-    """8th-order second derivative for the diffusion term."""
-    return ( -(1/560)*np.roll(u,-4) + (8/315)*np.roll(u,-3)
-             - (1/5)*np.roll(u,-2) + (8/5)*np.roll(u,-1)
-             - (205/72)*u
-             + (8/5)*np.roll(u,1) - (1/5)*np.roll(u,2)
-             + (8/315)*np.roll(u,3) - (1/560)*np.roll(u,4) ) / dx**2
-
-def RHS(u):
-    advection = get_weno_derivative(u)
-    diffusion = nu * d2(u)
-    return -advection + diffusion
-
-# ------------------------------------------------------------
-# Analytical Solution (Cole-Hopf)
-# ------------------------------------------------------------
-roots, weights = hermgauss(30)
-def exact_solution(x_arr, t):
-    if t == 0:
-        return -np.sin(np.pi * x_arr)
-    u_ex = np.zeros_like(x_arr)
-    for i, xi in enumerate(x_arr):
-        g = np.sqrt(4 * nu * t) * roots
-        y = xi - g
-        f_y = np.exp(-np.cos(np.pi * y) / (2 * np.pi * nu))
-        u_ex[i] = np.sum(weights * (-np.sin(np.pi * y)) * f_y) / np.sum(weights * f_y)
-    return u_ex
-
-# ------------------------------------------------------------
-# Animation Setup
-# ------------------------------------------------------------
-fig, ax = plt.subplots(figsize=(8, 5))
-
-line_ana, = ax.plot(x, u, 'b-', lw=2, label='Analytical (Cole-Hopf)')
-scatter_num = ax.scatter(x, u, color='r', s=15, label='Numerical (WENO-5)')
-
-ax.set_xlim(L_min, L_max)
-ax.set_ylim(-1.2, 1.2)
-ax.set_xlabel("x")
-ax.set_ylabel("u")
-ax.legend(loc="upper right")
-ax.grid()
-
-def init():
-    global u
-    u = u_initial.copy()
-    line_ana.set_data(x, u)
-    scatter_num.set_offsets(np.c_[x, u])
-    ax.set_title("Viscous Burgers: WENO-5 — t = 0.000")
-
-def update(frame):
-    global u
-    
-    # Time integration using RK3
-    for _ in range(steps_per_frame):
-        u1 = u + dt*RHS(u)
-        u2 = 0.75*u + 0.25*(u1 + dt*RHS(u1))
-        u  = (1.0/3)*u + (2.0/3)*(u2 + dt*RHS(u2))
-
-    t_current = (frame + 1) * steps_per_frame * dt
-    
-    scatter_num.set_offsets(np.c_[x, u])
-    u_ana = exact_solution(x, t_current)
-    line_ana.set_data(x, u_ana)
-
-    ax.set_title(f"Viscous Burgers: WENO-5 — t = {t_current:.3f}")
-
-ani = FuncAnimation(fig, update, frames=T_frames, init_func=init, interval=30, blit=False)
-plt.show()
-
-# %%
-# ============================================================
-# SECTION 8 — Animated WENO-7 vs Analytical (Viscous Burgers)
+#  WENO-7 vs Analytical (1D Viscous Burgers)
 # ============================================================
 
 import numpy as np
@@ -201,7 +31,7 @@ u = u_initial.copy()
 # ------------------------------------------------------------
 def weno7_flux(v1, v2, v3, v4, v5, v6, v7):
     """Computes the 7th-order WENO flux interpolation."""
-    eps = 1e-6
+    eps = 1e-10
     
     # 3rd-degree polynomial reconstructions (4 sub-stencils)
     q0 = -(1/4)*v1 + (13/12)*v2 - (23/12)*v3 + (25/12)*v4
@@ -348,6 +178,7 @@ def get_weno_wang_data():
     ])
     return data
 
+
 # ------------------------------------------------------------
 # Animation Setup
 # ------------------------------------------------------------
@@ -389,15 +220,23 @@ def update(frame):
     ax.set_title(f"Viscous Burgers: WENO-7 — t = {t_current:.3f}")
 
     # ------------------------------------------------------------
-    # Plot Wang (2010) data at the final frame
+    # Add Wang et al. 2010 at final time (t = 0.5 s)
     # ------------------------------------------------------------
     if frame == T_frames - 1:
         data = get_weno_wang_data()
         x_wang = data[:, 0]
         u_wang = data[:, 1]
 
-        ax.scatter(x_wang, u_wang, color='k', marker='x', s=60, linewidths=2)
-        ax.legend()
+        # Add labeled scatter ONLY once
+        ax.scatter(
+            x_wang, u_wang,
+            color='k', marker='x',
+            s=60, linewidths=2,
+            label='Wang et al. (2010)'
+        )
+
+        # Rebuild legend to include new entry
+        ax.legend(loc="upper right")
 
 ani = FuncAnimation(
     fig,

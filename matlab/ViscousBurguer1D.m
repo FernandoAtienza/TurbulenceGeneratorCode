@@ -6,6 +6,9 @@ clc; clear; close all;
 % 1 -> 7th order WENO FV
 scheme = 0;
 
+% ACtivate numerical hyperviscosity
+HV = 1;
+
 % Spatial input parameters
 L_min = -1; L_max = 1;
 dx = 1/15;                      % Grid spacing                          
