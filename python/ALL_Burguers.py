@@ -117,6 +117,9 @@ def rk3_step(u, RHS_func):
     u2 = 0.75*u + 0.25*(u1 + dt * RHS_func(u1))
     return (1.0/3)*u + (2.0/3)*(u2 + dt * RHS_func(u2))
 
+# ------------------------------------------------------------
+# 5. Wang solution
+# ------------------------------------------------------------
 import numpy as np
 
 def get_8fd_wang_data():
@@ -187,7 +190,7 @@ def init():
     scatter_upw.set_offsets(np.c_[x, u_upw])
     scatter_fd8.set_offsets(np.c_[x, u_fd8])
     scatter_weno.set_offsets(np.c_[x, u_weno])
-    ax.set_title("Master Comparison: Viscous Burgers Equation — t = 0.000")
+    ax.set_title("Comparison: Viscous Burgers Equation — t = 0.000")
 
 
 # Add a scatter object for Wang data, initially empty
@@ -226,7 +229,7 @@ def update(frame):
         # Update legend to include Wang
         ax.legend(loc="upper right", framealpha=0.9)
 
-    ax.set_title(f"Master Comparison: Viscous Burgers Equation — t = {t_current:.3f}")
+    ax.set_title(f"Comparison: Viscous Burgers Equation — t = {t_current:.3f}")
 
 ani = FuncAnimation(
     fig,

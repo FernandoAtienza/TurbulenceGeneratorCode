@@ -1,5 +1,6 @@
 # ============================================================
-# Hybrid Scheme: 8th-Order Compact FD + WENO-7
+# Hybrid Scheme: ç
+# 8th-Order Compact FD + WENO-7 + Numerical Hyperviscosity
 # ============================================================
 
 import numpy as np
@@ -18,7 +19,7 @@ nu = 0.01 / np.pi
 
 # Numerical hyperviscosity
 mn = 0.01
-use_flux_hypervisc = True  # Set to False to use simple formulation for debugging
+use_flux_hypervisc = True
 
 # Plot timestep
 T_frames = 100 # x0.001 sec

@@ -13,7 +13,7 @@ nx = 101
 dx = (L_max - L_min) / (nx - 1)
 dt = 0.001
 nu = 0.01 / np.pi
-T_steps = 500  # Simulate up to t=0.5
+T_steps = 100  # Simulate up to t=0.5
 
 x = np.linspace(L_min, L_max, nx)
 
@@ -185,7 +185,7 @@ nx = 31
 dt = 0.001
 nu = 0.01 / np.pi
 
-T_frames = 300
+T_frames = 100
 steps_per_frame = 10
 
 x = np.linspace(L_min, L_max, nx)
@@ -271,7 +271,7 @@ def update(frame):
     ax.set_title(f"Viscous Burgers: 8th-Order FD — t = {t_current:.3f}")
 
 # Changed blit=False
-ani = FuncAnimation(fig, update, frames=T_frames, init_func=init, interval=30, blit=False)
+ani = FuncAnimation(fig, update, frames=T_frames, init_func=init, interval=30, blit=False, repeat=False )
 
 plt.show()
 # %%
