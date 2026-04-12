@@ -169,6 +169,12 @@ def update(frame):
         data_wang = get_8fd_wang_data()
         scatter_wang.set_offsets(data_wang)
         ax.legend(loc="upper right")
+        
+        # --- NEW: Print the final values to the console ---
+        print(f"\n--- Simulated Values at t = {t_current:.3f} ---")
+        for xi, ui in zip(x_plot, u_plot):
+            print(f"{xi:.16f}, {ui:.16f}")
+        print("----------------------------------------\n")
 
     ax.set_title(f"Viscous Burgers: 8th-Order Compact FD — t = {t_current:.3f}")
 
