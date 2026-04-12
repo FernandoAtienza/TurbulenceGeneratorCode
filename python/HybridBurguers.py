@@ -12,7 +12,7 @@ import scipy.sparse.linalg as spla
 
 # Parameters
 L_min, L_max = -1.0, 1.0
-nx = 31
+nx = 30
 dx = 1/15
 dt = 0.001
 nu = 0.01 / np.pi
