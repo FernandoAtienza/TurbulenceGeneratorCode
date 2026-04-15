@@ -29,7 +29,8 @@ u_initial = -np.sin(np.pi * x_solve)
 u = u_initial.copy()
 
 # ------------------------------------------------------------
-# 1. 8th-Order Compact Scheme for 1st Derivative (Advection)
+# 1. 8th-Order Compact Scheme for 1st Derivative (Advection) 
+#    (Wang et al. 2010, Eq. 22)
 # ------------------------------------------------------------
 alpha1 = 3.0 / 8.0
 a1 = 25.0 / 32.0
@@ -42,18 +43,19 @@ A_lil[-1, 0] = alpha1
 solve_A = spla.factorized(A_lil.tocsc())
 
 def d1_compact(arr):
-    rhs = ( a1 * (np.roll(arr, -1) - np.roll(arr, 1)) +
-            b1 * (np.roll(arr, -2) - np.roll(arr, 2)) +
-            c1 * (np.roll(arr, -3) - np.roll(arr, 3)) ) / dx
+    rhs = ( a1 * (np.roll(arr, -1) - np.roll(arr, 1)) +       # f_j+1 - f_j-1
+            b1 * (np.roll(arr, -2) - np.roll(arr, 2)) +       # f_j+2 - f_j-2
+            c1 * (np.roll(arr, -3) - np.roll(arr, 3)) ) / dx  # f_j+3 - f_j-3
     return solve_A(rhs)
 
 # ------------------------------------------------------------
 # 2. 6th-Order Explicit Scheme for 2nd Derivative (Viscous)
+#    (Lele 1992, Eq. 22)
 # ------------------------------------------------------------
 def d2_6th(arr):
-    return ( (1/90)*(np.roll(arr, -3) + np.roll(arr, 3))
-           - (3/20)*(np.roll(arr, -2) + np.roll(arr, 2))
-           + (3/2) *(np.roll(arr, -1) + np.roll(arr, 1))
+    return ( (1/90)*(np.roll(arr, -3) + np.roll(arr, 3))      # f_j+3 + f_j-3
+           - (3/20)*(np.roll(arr, -2) + np.roll(arr, 2))      # f_j+2 + f_j-2
+           + (3/2) *(np.roll(arr, -1) + np.roll(arr, 1))      # f_j+1 + f_j-1
            - (49/18)*arr ) / (dx**2)
 
 # ------------------------------------------------------------

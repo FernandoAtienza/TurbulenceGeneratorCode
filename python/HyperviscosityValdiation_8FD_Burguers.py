@@ -20,7 +20,7 @@ nx = 30  # Strictly 30 unique intervals for periodic math
 dt = 0.001
 nu = 0.01 / np.pi
 
-mn = 1.0 # Hyperviscosity parameter
+mn = 1.0 # Numerical Hyperviscosity parameter
 
 T_frames = 50  # Ends exactly at t = 0.5
 steps_per_frame = 10

@@ -24,7 +24,7 @@ use_hyperviscosity = True
 mn = 0.01       # Numerical hyperviscosity proposed for the hybrid scheme
 
 # Plot timestep
-T_frames = 100 
+T_frames = 50 
 steps_per_frame = 10
 
 x_solve = np.linspace(L_min, L_max - dx, nx)
@@ -44,10 +44,10 @@ A_adv_lil[0, -1] = alpha1_c; A_adv_lil[-1, 0] = alpha1_c
 solve_A_adv = spla.factorized(A_adv_lil.tocsc())
 
 def d2_6th(arr):
-    return ( (1/90)*(np.roll(arr, -3) + np.roll(arr, 3))
-           - (3/20)*(np.roll(arr, -2) + np.roll(arr, 2))
-           + (3/2) *(np.roll(arr, -1) + np.roll(arr, 1))
-           - (49/18)*arr ) / (dx**2)
+    return ( (1/90)*(np.roll(arr, -3) + np.roll(arr, 3))    # f_j+3 + f_j-3
+           - (3/20)*(np.roll(arr, -2) + np.roll(arr, 2))    # f_j+2 + f_j-2
+           + (3/2) *(np.roll(arr, -1) + np.roll(arr, 1))    # f_j+1 + f_j-1
+           - (49/18)*arr ) / (dx**2)                        # f_j
 
 # ============================================================
 # 2. Hyperviscosity Matrices (Wang Eqs. 39-42)
@@ -186,6 +186,43 @@ def apply_semi_implicit_hyperviscosity(u_current, shock_mask):
     rhs_implicit = u_current - dt_hyp * mn * E
     return solve_L_hyp(C_hyp_csc @ rhs_implicit)
 
+# ------------------------------------------------------------
+# Wang 2010 Hybrid Digitized Data
+# ------------------------------------------------------------
+def get_wang_hybrid_data():
+    return np.array([
+        [-1.0007757261757766, -0.011070110701107083],
+        [-0.9351485800296768,  0.07195571955719582],
+        [-0.865664153266412,   0.15498154981549805],
+        [-0.8000405654972653,  0.23247232472324675],
+        [-0.7344134193511653,  0.31549815498154987],
+        [-0.6649325509648538,  0.39298892988929834],
+        [-0.599301846441801,   0.48154981549815523],
+        [-0.5336853754265602,  0.5479704797047966],
+        [-0.46420450704024874, 0.6254612546125462],
+        [-0.40051667633359056, 0.6918819188191878],
+        [-0.33296800663281445, 0.7638376383763834],
+        [-0.2673515356175741,  0.830258302583025],
+        [-0.19981709942461012, 0.8800738007380069],
+        [-0.13613638547185847, 0.9354243542435423],
+        [-0.06865888331014458, 0.8966789667896675],
+        [ 0.00019215235546776732, -0.005535055350553542],
+        [ 0.06710743095859129, -0.9188191881918822],
+        [ 0.1307347692570464,  -0.946494464944649],
+        [ 0.19826564707305705, -0.9022140221402217],
+        [ 0.26580720001992697, -0.8413284132841334],
+        [ 0.33142011265821436, -0.7804428044280441],
+        [ 0.39896878235899047, -0.7084870848708482],
+        [ 0.46458525337423096, -0.6420664206642065],
+        [ 0.5321374814519602,  -0.5645756457564574],
+        [ 0.599686151152736,   -0.4926199261992614],
+        [ 0.665313297298836,   -0.4095940959409594],
+        [ 0.7328655253765655,  -0.3321033210332107],
+        [ 0.7984926715226646,  -0.24907749077490737],
+        [ 0.8660484579773473,  -0.16605166051660536],
+        [ 0.9335971276781236,  -0.09409594095941043]
+    ])
+
 # ============================================================
 # 5. Exact Solution & Animation
 # ============================================================
@@ -207,6 +244,9 @@ scatter_num = ax.scatter([], [], color='g', s=30, zorder=5)
 ax.scatter([], [], color='g', s=30, label='8th-Order Compact FD (Smooth)')
 ax.scatter([], [], color='r', s=30, label='WENO-7 (Shock Area)')
 
+# Wang et al. (Hybrid) Data point
+scatter_wang = ax.scatter([], [], color='black', marker='x', s=60, linewidths=2, zorder=6, label='Wang et al. 2010 (Hybrid)')
+
 ax.set_xlim(L_min, L_max); ax.set_ylim(-1.5, 1.5)
 ax.set_xlabel("x"); ax.set_ylabel("u")
 ax.legend(loc="upper right"); ax.grid(True, linestyle='--', alpha=0.6)
@@ -217,6 +257,7 @@ def init():
     line_ana.set_data(x_plot, exact_solution(x_plot, 0))
     scatter_num.set_offsets(np.c_[x_plot, np.append(u, u[0])])
     scatter_num.set_color('g')
+    scatter_wang.set_offsets(np.empty((0, 2)))
     ax.set_title("Hybrid Viscous Burgers — t = 0.000")
 
 def update(frame):
@@ -227,7 +268,6 @@ def update(frame):
         theta = (np.roll(u, -1) - np.roll(u, 1)) / (2 * dx)
         theta_rms = np.sqrt(np.mean(theta**2))
         
-        # Protection against pure flat-line precision errors
         if theta_rms < 1e-12:
             is_shock_node = np.zeros_like(u, dtype=bool)
         else:
@@ -258,6 +298,11 @@ def update(frame):
     scatter_num.set_offsets(np.c_[x_plot, u_plot])
     scatter_num.set_color(np.where(shock_plot, 'r', 'g'))
     line_ana.set_data(x_plot, exact_solution(x_plot, t_current))
+    
+    # Overlay the Wang Hybrid Data at the final frame
+    if frame == T_frames - 1:
+        wang_data = get_wang_hybrid_data()
+        scatter_wang.set_offsets(wang_data)
 
     ax.set_title(f"Hybrid Scheme (Compact FD + WENO-7) — t = {t_current:.3f}")
 
