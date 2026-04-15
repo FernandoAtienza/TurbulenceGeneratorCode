@@ -20,7 +20,7 @@ nx = 30  # Strictly 30 unique intervals for periodic math
 dt = 0.001
 nu = 0.01 / np.pi
 
-mn = 1.0 # Numerical Hyperviscosity parameter
+mn = 1.0 # Hyperviscosity parameter
 
 T_frames = 50  # Ends exactly at t = 0.5
 steps_per_frame = 10
@@ -55,7 +55,6 @@ def d2_6th(arr):
 # ============================================================
 # 2. Wang's Hyperviscosity Matrices (Eq 39 - 42)
 # ============================================================
-# First Derivative Operator (Eq 39-40)
 a2 = 4/9; b2 = 1/36
 a2_tilde = 20/27; b2_tilde = 25/216
 
@@ -69,7 +68,6 @@ B_hyp_lil[0, -1] = -a2_tilde/dx; B_hyp_lil[0, -2] = -b2_tilde/dx; B_hyp_lil[1, -
 B_hyp_lil[-1, 0] = a2_tilde/dx; B_hyp_lil[-2, 0] = b2_tilde/dx; B_hyp_lil[-1, 1] = b2_tilde/dx
 B_hyp = B_hyp_lil.tocsc()
 
-# Second Derivative Operator (Eq 41-42)
 a3 = 344/1179; b3 = (38*a3 - 9)/214
 a3_tilde = (696 - 1191*a3)/428; b3_tilde = (1227*a3 - 147)/1070
 
@@ -85,11 +83,7 @@ D_hyp_lil[0, -1] = a3_tilde/dx**2; D_hyp_lil[0, -2] = b3_tilde/dx**2; D_hyp_lil[
 D_hyp_lil[-1, 0] = a3_tilde/dx**2; D_hyp_lil[-2, 0] = b3_tilde/dx**2; D_hyp_lil[-1, 1] = b3_tilde/dx**2
 D_hyp = D_hyp_lil.tocsc()
 
-# ============================================================
-# 3. Semi-Implicit Operator Factorization (Constant)
-# ============================================================
 dt_hyp = 5 * dt
-# Form L_imp = (C - dt_hyp * mn * D) to solve implicit Euler step
 L_imp = C_hyp - dt_hyp * mn * D_hyp
 solve_L_hyp = spla.factorized(L_imp)
 
@@ -128,15 +122,39 @@ def get_wang_mn1_data():
         [0.797639, -0.235675], [0.863417, -0.158041], [0.933070, -0.085952]
     ])
 
+def get_8fd_wang_data_no_visc():
+    return np.array([
+        [-1.0017286084701815, -0.0004531722054383902], [-0.9343128781331029, 0.044410876132930266],
+        [-0.8668971477960242, 0.24879154078549814], [-0.801210025929127, 0.10921450151057366],
+        [-0.7337942955920483, 0.5129909365558907], [-0.6663785652549699, 0.14909365558912335],
+        [-0.6006914433880728, 0.7921450151057401], [-0.5350043215211755, 0.18398791540785475],
+        [-0.4675885911840969, 1.036404833836858], [-0.4019014693171996, 0.25377643504531666],
+        [-0.334485738980121, 1.2208459214501508], [-0.2670700086430423, 0.36344410876132893],
+        [-0.20138288677614524, 1.3354984894259812], [-0.13569576490924795, 0.4731117824773412],
+        [-0.06655142610198816, 1.4302114803625374], [-0.0008643042350907626, -0.0004531722054383902],
+        [0.06482281763180642, -1.4211480362537765], [0.13396715643906631, -0.4690332326283988],
+        [0.1979256698357823, -1.3314199395770399], [0.2653414001728607, -0.36435045317220593],
+        [0.3310285220397582, -1.2067975830815716], [0.39844425237683656, -0.2546827794561932],
+        [0.46413137424373363, -1.01737160120846], [0.5332757130509942, -0.17990936555891235],
+        [0.5972342264477097, -0.77809667673716], [0.6629213483146073, -0.13504531722054436],
+        [0.7320656871218669, -0.5089123867069494], [0.7960242005185822, -0.10513595166163192],
+        [0.8668971477960241, -0.2397280966767379], [0.9325842696629216, -0.045317220543807046]
+    ])
+
 # ------------------------------------------------------------
 # Animation Setup
 # ------------------------------------------------------------
 fig, ax = plt.subplots(figsize=(10, 6))
 
 line_ana, = ax.plot(x_plot, exact_solution(x_plot, 0), 'b-', lw=2, label='Analytical', zorder=2)
-scatter_no_visc = ax.scatter([], [], color='red', marker='x', s=40, label='Compact (NO Damping)', zorder=4)
-scatter_visc = ax.scatter([], [], color='green', marker='o', s=30, label=f'Compact (Wang Hypervisc, $m_n={mn}$)', zorder=3)
-scatter_wang = ax.scatter([], [], color='black', marker='s', s=40, facecolors='none', linewidths=1.5, zorder=5, label='Wang Paper Data ($m_n=1.0$)')
+
+# This work
+scatter_no_visc = ax.scatter([], [], color='red', marker='o', s=30, label='This work (No Damping)', zorder=4)
+scatter_visc = ax.scatter([], [], color='green', marker='o', s=30, label=f'This work ($m_n={mn}$)', zorder=4)
+
+# Wang 2010 Data (Squares, unfilled)
+scatter_wang_no_visc = ax.scatter([], [], color='red', marker='s', s=45, facecolors='none', linewidths=1.5, zorder=5, label='Wang 2010 (No Damping)')
+scatter_wang_visc = ax.scatter([], [], color='green', marker='s', s=45, facecolors='none', linewidths=1.5, zorder=5, label=f'Wang 2010 ($m_n=1.0$)')
 
 ax.set_xlim(L_min, L_max); ax.set_ylim(-1.6, 1.6)
 ax.set_xlabel("x"); ax.set_ylabel("u")
@@ -148,7 +166,8 @@ def init():
     line_ana.set_data(x_plot, exact_solution(x_plot, 0))
     scatter_no_visc.set_offsets(np.c_[x_plot, np.append(u_no_visc, u_no_visc[0])])
     scatter_visc.set_offsets(np.c_[x_plot, np.append(u_visc, u_visc[0])])
-    scatter_wang.set_offsets(np.empty((0, 2)))
+    scatter_wang_no_visc.set_offsets(np.empty((0, 2)))
+    scatter_wang_visc.set_offsets(np.empty((0, 2)))
     ax.set_title("Hyperviscosity Validation — t = 0.000")
 
 def update(frame):
@@ -167,14 +186,9 @@ def update(frame):
 
         # 3. WANG'S 5-STEP SEMI-IMPLICIT HYPERVISCOSITY FILTER
         if (step + 1) % 5 == 0:
-            # Explicit evaluation of (u_x)_x
             ux = solve_A_hyp(B_hyp @ u_visc)
             uxx_explicit = solve_A_hyp(B_hyp @ ux)
-            
-            # Setup RHS of Implicit Euler: RHS = C * [u_old - dt_hyp * mn * (u_x)_x]
             rhs_implicit = u_visc - dt_hyp * mn * uxx_explicit
-            
-            # Solve L_imp * u_new = C * RHS
             u_visc = solve_L_hyp(C_hyp @ rhs_implicit)
 
     t_current = (frame + 1) * steps_per_frame * dt
@@ -187,14 +201,10 @@ def update(frame):
     line_ana.set_data(x_plot, exact_solution(x_plot, t_current))
 
     if frame == T_frames - 1:
-        scatter_wang.set_offsets(get_wang_mn1_data())
+        # Map both Wang datasets at the final frame
+        scatter_wang_no_visc.set_offsets(get_8fd_wang_data_no_visc())
+        scatter_wang_visc.set_offsets(get_wang_mn1_data())
         ax.legend(loc="upper right")
-        print(f"\n--- Output at t = {t_current:.3f} ---")
-        print(f"{'x':>10} | {'u (No Damping)':>20} | {'u (mn=1.0)':>20}")
-        print("-" * 58)
-        for xi, u_nv, u_v in zip(x_plot, u_nv_plot, u_v_plot):
-            print(f"{xi:10.5f} | {u_nv:20.15f} | {u_v:20.15f}")
-        print("-" * 58)
 
     ax.set_title(f"Hyperviscosity Validation — t = {t_current:.3f}")
 
