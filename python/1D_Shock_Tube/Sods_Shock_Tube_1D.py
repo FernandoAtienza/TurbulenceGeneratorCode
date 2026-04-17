@@ -1,6 +1,6 @@
 # ============================================================
-# 1D Euler Equations: Sod's Shock Tube (Di Renzo 2020, 6.4.1)
-# Domain: Strictly x in [0.0, 1.0] with 100 elements
+# 1D Euler Equations: Sod's Shock Tube
+# Restored Ghost Padding + Thermodynamic Fix
 # ============================================================
 
 import numpy as np
@@ -9,44 +9,43 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 # ------------------------------------------------------------
-# Parameters (Sod's Shock Tube)
+# Parameters
 # ------------------------------------------------------------
 gamma = 1.4
 R_gas = 1.0
 
-L_min, L_max = 0.0, 1.0
-nx = 100  # 100 elements
-dx = (L_max - L_min) / (nx - 1)
-dt = 0.001
+# GHOST PADDING is mandatory for periodic matrices.
+# Simulate [-0.5, 1.5] with 200 points. 
+# This yields dx = 0.01, exactly matching a 100-point [0, 1] grid.
+L_min, L_max = -0.5, 1.5
+nx = 200  
+dx = (L_max - L_min) / nx
+dt = 0.0005
 t_end = 0.2
 num_steps = int(t_end / dt)
 
-mn = 5.0  # Hyperviscosity parameter
-
-x_solve = np.linspace(L_min, L_max, nx)
+mn = 0.02  # Hyperviscosity parameter
+x_solve = np.linspace(L_min, L_max - dx, nx)
 
 # Initial conditions (Sod)
 rho = np.where(x_solve < 0.5, 1.0, 0.125)
 u = np.zeros_like(x_solve)
 P = np.where(x_solve < 0.5, 1.0, 0.1)
 
-# Conservative variables Q = [rho, rho*u, E]
+# Conservative variables Q
 Q = np.zeros((3, nx))
 Q[0] = rho
 Q[1] = rho * u
 Q[2] = P / (gamma - 1) + 0.5 * rho * u**2
 
 # ============================================================
-# 1. Base Advection Matrices (8th-Order Compact, Periodic)
+# Matrices (8th-Order Compact & Hyperviscosity)
 # ============================================================
 alpha1_c = 3.0 / 8.0
 A_adv_lil = sp.diags([alpha1_c, 1.0, alpha1_c], [-1, 0, 1], shape=(nx, nx)).tolil()
 A_adv_lil[0, -1] = alpha1_c; A_adv_lil[-1, 0] = alpha1_c
 solve_A_adv = spla.factorized(A_adv_lil.tocsc())
 
-# ============================================================
-# 2. Hyperviscosity Matrices (Wang Eqs. 39-42, Periodic)
-# ============================================================
 a2_t = 20/27; b2_t = 25/216
 a3_h = 344/1179; b3_h = (38*a3_h - 9)/214
 a3_t = (696 - 1191*a3_h)/428; b3_t = (1227*a3_h - 147)/1070
@@ -64,7 +63,6 @@ B_hyp = B_hyp_lil.tocsc()
 
 C_hyp_lil = sp.diags([b3_h, a3_h, 1.0, a3_h, b3_h], [-2, -1, 0, 1, 2], shape=(nx, nx)).tolil()
 C_hyp_lil[0, -1] = a3_h; C_hyp_lil[0, -2] = b3_h; C_hyp_lil[1, -1] = b3_h
-C_hyp_lil[-1, 0] = a3_h; C_hyp_lil[-2, 0] = b3_h; C_hyp_lil[-1, 1] = b3_h
 C_hyp_csc = C_hyp_lil.tocsc()
 solve_C_hyp = spla.factorized(C_hyp_csc)
 
@@ -80,7 +78,7 @@ L_imp = C_hyp_csc - dt_hyp * mn * D_hyp
 solve_L_hyp = spla.factorized(L_imp)
 
 # ============================================================
-# 3. WENO-7 Flux Splitting
+# 3. WENO-7 LOCAL LF Flux Splitting
 # ============================================================
 def weno7_flux(v1, v2, v3, v4, v5, v6, v7):
     eps = 1e-10
@@ -100,11 +98,11 @@ def weno7_flux(v1, v2, v3, v4, v5, v6, v7):
     
     return (alpha0*q0 + alpha1*q1 + alpha2*q2 + alpha3*q3) / sum_alpha
 
-def get_weno7_euler_flux(Q_arr, F_arr, alpha_max):
+def get_weno7_euler_flux_LLF(Q_arr, F_arr, alpha_local):
     F_half = np.zeros_like(Q_arr)
     for k in range(3):
-        fp = 0.5 * (F_arr[k] + alpha_max * Q_arr[k])
-        fm = 0.5 * (F_arr[k] - alpha_max * Q_arr[k])
+        fp = 0.5 * (F_arr[k] + alpha_local * Q_arr[k])
+        fm = 0.5 * (F_arr[k] - alpha_local * Q_arr[k])
         
         fp_half = weno7_flux(np.roll(fp,3), np.roll(fp,2), np.roll(fp,1), fp, np.roll(fp,-1), np.roll(fp,-2), np.roll(fp,-3))
         fm_half = weno7_flux(np.roll(fm,-4), np.roll(fm,-3), np.roll(fm,-2), np.roll(fm,-1), fm, np.roll(fm,1), np.roll(fm,2))
@@ -113,7 +111,7 @@ def get_weno7_euler_flux(Q_arr, F_arr, alpha_max):
     return F_half
 
 # ============================================================
-# 4. Operators with BOUNDARY FREEZING
+# 4. Operators
 # ============================================================
 def RHS_euler_hybrid(Q_curr, shock_mask):
     rho = np.maximum(Q_curr[0], 1e-8)
@@ -127,12 +125,12 @@ def RHS_euler_hybrid(Q_curr, shock_mask):
     F_curr[2] = (E + P) * u
     
     c = np.sqrt(gamma * P / rho)
-    alpha_max = np.max(np.abs(u) + c)
+    alpha_local = np.abs(u) + c  # LOCAL wave speed array
     
     a1_c = 25/32; b1_c = 1/20; c1_c = -1/480
     advection = np.zeros_like(Q_curr)
     
-    F_weno_raw = get_weno7_euler_flux(Q_curr, F_curr, alpha_max)
+    F_weno_raw = get_weno7_euler_flux_LLF(Q_curr, F_curr, alpha_local)
     
     for k in range(3):
         f = F_curr[k]
@@ -152,10 +150,6 @@ def RHS_euler_hybrid(Q_curr, shock_mask):
         F_hybrid[is_joint_edge]  = 0.5 * (F_comp[is_joint_edge] + F_weno_hat[is_joint_edge])
         
         advection[k] = solve_A_adv((F_hybrid - np.roll(F_hybrid, 1)) / dx)
-        
-        # FREEZE BOUNDARIES
-        advection[k, :6] = 0.0
-        advection[k, -6:] = 0.0
                        
     return -advection
 
@@ -179,35 +173,28 @@ def apply_semi_implicit_hyperviscosity(u_current, shock_mask):
     
     E = solve_A_hyp(G_mod - np.roll(G_mod, 1))
     rhs_implicit = u_current - dt_hyp * mn * E
-    u_new = solve_L_hyp(C_hyp_csc @ rhs_implicit)
-    
-    # FREEZE BOUNDARIES
-    u_new[:6] = u_current[:6]
-    u_new[-6:] = u_current[-6:]
-    return u_new
+    return solve_L_hyp(C_hyp_csc @ rhs_implicit)
 
 # ============================================================
-# 5. Integration Loop
+# 5. Integration Loop (Thermodynamically Preserved)
 # ============================================================
 for step in range(num_steps):
     rho_curr = np.maximum(Q[0], 1e-8)
     u_curr = Q[1] / rho_curr
     
-    # Dilatation shock sensor
+    # 1. Velocity Dilatation (Detects Shock Waves ONLY)
     theta = (np.roll(u_curr, -1) - np.roll(u_curr, 1)) / (2 * dx)
     theta_rms = np.sqrt(np.mean(theta**2))
-    
     if theta_rms < 1e-8:
         is_shock_node = np.zeros_like(u_curr, dtype=bool)
     else:
         is_shock_node = theta < -3.0 * theta_rms
-        
+
     shock_region = np.copy(is_shock_node)
     for k in range(1, 4):  
         shock_region |= np.roll(is_shock_node, k)
         shock_region |= np.roll(is_shock_node, -k)
     
-    # RK3 Step
     Q1 = Q + dt * RHS_euler_hybrid(Q, shock_region)
     Q2 = 0.75*Q + 0.25*(Q1 + dt * RHS_euler_hybrid(Q1, shock_region))
     Q  = (1.0/3)*Q + (2.0/3)*(Q2 + dt * RHS_euler_hybrid(Q2, shock_region))
@@ -218,22 +205,20 @@ for step in range(num_steps):
         u = Q[1] / rho
         E = Q[2]
         P = np.maximum((gamma - 1) * (E - 0.5 * rho * u**2), 1e-8)
-        T = P / (rho * R_gas)
         
+        # FILTER P INSTEAD OF T (Preserves Internal Energy)
         rho_new = apply_semi_implicit_hyperviscosity(rho, shock_region)
         u_new = apply_semi_implicit_hyperviscosity(u, shock_region)
-        T_new = apply_semi_implicit_hyperviscosity(T, shock_region)
+        P_new = apply_semi_implicit_hyperviscosity(P, shock_region) 
         
         Q[0] = rho_new
         Q[1] = rho_new * u_new
-        P_new = rho_new * T_new * R_gas
         Q[2] = P_new / (gamma - 1) + 0.5 * rho_new * u_new**2
 
 # ============================================================
 # 6. Exact Sod Solution (t=0.2)
 # ============================================================
 def exact_sod_02(x_arr):
-    """Hardcoded Exact Riemann solution for Sod's tube at t=0.2"""
     P3, u3, rho3, rho4 = 0.30313, 0.92745, 0.42632, 0.26557
     cL, c3, V_shock = 1.18321, 0.99772, 1.75215
     
@@ -248,18 +233,18 @@ def exact_sod_02(x_arr):
     u_ex_arr = np.zeros_like(x_arr)
     
     for i, x in enumerate(x_arr):
-        if x < head: # Region 1 (Left)
+        if x < head: 
             rho_ex[i], P_ex[i], u_ex = 1.0, 1.0, 0.0
-        elif x < tail: # Region 2 (Expansion)
+        elif x < tail: 
             u_ex = 2/(gamma+1) * (cL + (x - 0.5)/0.2)
             c = cL - (gamma-1)/2 * u_ex
             rho_ex[i] = 1.0 * (c/cL)**(2/(gamma-1))
             P_ex[i] = 1.0 * (c/cL)**(2*gamma/(gamma-1))
-        elif x < contact: # Region 3
+        elif x < contact: 
             rho_ex[i], P_ex[i], u_ex = rho3, P3, u3
-        elif x < shock: # Region 4
+        elif x < shock: 
             rho_ex[i], P_ex[i], u_ex = rho4, P3, u3
-        else: # Region 5 (Right)
+        else: 
             rho_ex[i], P_ex[i], u_ex = 0.125, 0.1, 0.0
             
         e_ex[i] = P_ex[i] / (rho_ex[i] * (gamma - 1))
@@ -268,52 +253,48 @@ def exact_sod_02(x_arr):
     return rho_ex, P_ex, e_ex, u_ex_arr
 
 # ============================================================
-# 7. Plotting (2x2 Grid)
+# 7. Plotting (Slicing only the [0, 1] physical region)
 # ============================================================
-# Calculate primitive variables
-rho_num = Q[0]
-u_num = Q[1] / rho_num
-E_num = Q[2]
+plot_mask = (x_solve >= 0.0) & (x_solve <= 1.0)
+x_plot = x_solve[plot_mask]
+
+rho_num = Q[0, plot_mask]
+u_num = Q[1, plot_mask] / rho_num
+E_num = Q[2, plot_mask]
 P_num = (gamma - 1) * (E_num - 0.5 * rho_num * u_num**2)
 e_num = P_num / (rho_num * (gamma - 1)) 
 
-# Normalizing values (Internal Energy left unnormalized)
 rho_norm = rho_num / 1.0
 P_norm = P_num / 1.0
 u_norm = u_num / 1.0
 
-# Exact solution arrays
-rho_ex, P_ex, e_ex, u_exact_arr = exact_sod_02(x_solve)
+rho_ex, P_ex, e_ex, u_exact_arr = exact_sod_02(x_plot)
 rho_ex_norm = rho_ex / 1.0
 P_ex_norm = P_ex / 1.0
 u_ex_norm = u_exact_arr / 1.0
 
 fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-fig.suptitle("Sod's Shock Tube: Hybrid Scheme (t = 0.2 s)", fontsize=15, fontweight='bold')
+fig.suptitle("Sod's Shock Tube: Hybrid Scheme (t = 0.2 s)\n(Computed with Ghost Padding, Plotted [0,1])", fontsize=15, fontweight='bold')
 
-# --- Top Left: Density ---
-axs[0, 0].plot(x_solve, rho_ex_norm, 'k-', lw=1.5, label='Exact')
-axs[0, 0].scatter(x_solve, rho_norm, color='r', s=15, label='Hybrid Scheme')
+axs[0, 0].plot(x_plot, rho_ex_norm, 'k-', lw=1.5, label='Exact')
+axs[0, 0].scatter(x_plot, rho_norm, color='r', s=15, label='Hybrid Scheme')
 axs[0, 0].set_title("Normalized Density")
 axs[0, 0].set_ylim(-0.1, 1.1)
 
-# --- Top Right: Pressure ---
-axs[0, 1].plot(x_solve, P_ex_norm, 'k-', lw=1.5, label='Exact')
-axs[0, 1].scatter(x_solve, P_norm, color='g', s=15, label='Hybrid Scheme')
+axs[0, 1].plot(x_plot, P_ex_norm, 'k-', lw=1.5, label='Exact')
+axs[0, 1].scatter(x_plot, P_norm, color='g', s=15, label='Hybrid Scheme')
 axs[0, 1].set_title("Normalized Pressure")
 axs[0, 1].set_ylim(-0.1, 1.1)
 
-# --- Bottom Left: Velocity ---
-axs[1, 0].plot(x_solve, u_ex_norm, 'k-', lw=1.5, label='Exact')
-axs[1, 0].scatter(x_solve, u_norm, color='m', s=15, label='Hybrid Scheme')
+axs[1, 0].plot(x_plot, u_ex_norm, 'k-', lw=1.5, label='Exact')
+axs[1, 0].scatter(x_plot, u_norm, color='m', s=15, label='Hybrid Scheme')
 axs[1, 0].set_title("Normalized Velocity")
 axs[1, 0].set_ylim(-0.1, 1.1)
 
-# --- Bottom Right: Internal Energy (Unnormalized) ---
-axs[1, 1].plot(x_solve, e_ex, 'k-', lw=1.5, label='Exact')
-axs[1, 1].scatter(x_solve, e_num, color='b', s=15, label='Hybrid Scheme')
+axs[1, 1].plot(x_plot, e_ex, 'k-', lw=1.5, label='Exact')
+axs[1, 1].scatter(x_plot, e_num, color='b', s=15, label='Hybrid Scheme')
 axs[1, 1].set_title("Internal Energy (Unnormalized)")
-axs[1, 1].set_ylim(1.5, 3.0)  # Unnormalized Sod energy ranges from ~1.78 to 2.5
+axs[1, 1].set_ylim(1.5, 3.0) 
 
 for ax in axs.flat:
     ax.set_xlim(0, 1)
@@ -321,5 +302,5 @@ for ax in axs.flat:
     ax.grid(True, linestyle='--', alpha=0.6)
     ax.legend(loc="best")
 
-plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to fit suptitle
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 plt.show()
