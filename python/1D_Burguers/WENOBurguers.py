@@ -16,7 +16,7 @@ dx = 1/15
 dt = 0.001
 nu = 0.01 / np.pi
 
-T_frames = 50 # x0.001 sec
+T_frames = 200 # x0.001 sec
 steps_per_frame = 10
 
 x = np.linspace(L_min, L_max, nx)

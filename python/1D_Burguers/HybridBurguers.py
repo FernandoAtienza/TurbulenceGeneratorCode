@@ -24,7 +24,7 @@ use_hyperviscosity = True
 mn = 0.01       # Numerical hyperviscosity proposed for the hybrid scheme
 
 # Plot timestep
-T_frames = 50 
+T_frames = 100 
 steps_per_frame = 10
 
 x_solve = np.linspace(L_min, L_max - dx, nx)
@@ -245,7 +245,7 @@ ax.scatter([], [], color='g', s=30, label='8th-Order Compact FD (Smooth)')
 ax.scatter([], [], color='r', s=30, label='WENO-7 (Shock Area)')
 
 # Wang et al. (Hybrid) Data point
-scatter_wang = ax.scatter([], [], color='black', marker='x', s=60, linewidths=2, zorder=6, label='Wang et al. 2010 (Hybrid)')
+scatter_wang = ax.scatter([], [], color='black', facecolors='none', marker='s', s=45, linewidths=1.75, zorder=6, label='Wang et al. 2010 (Hybrid)')
 
 ax.set_xlim(L_min, L_max); ax.set_ylim(-1.5, 1.5)
 ax.set_xlabel("x"); ax.set_ylabel("u")
@@ -304,7 +304,7 @@ def update(frame):
         wang_data = get_wang_hybrid_data()
         scatter_wang.set_offsets(wang_data)
 
-    ax.set_title(f"Hybrid Scheme (Compact FD + WENO-7) — t = {t_current:.3f}")
+    ax.set_title(f"Hybrid Scheme (Compact 8th FD + WENO-7) — t = {t_current:.3f}")
 
 ani = FuncAnimation(
     fig, update, frames=T_frames, init_func=init, interval=30, blit=False, repeat=False 
