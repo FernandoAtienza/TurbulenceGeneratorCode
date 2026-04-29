@@ -24,7 +24,7 @@ use_hyperviscosity = True
 mn = 0.01       # Numerical hyperviscosity proposed for the hybrid scheme
 
 # Plot timestep
-T_frames = 50 
+T_frames = 100 
 steps_per_frame = 10
 
 x_solve = np.linspace(L_min, L_max - dx, nx)

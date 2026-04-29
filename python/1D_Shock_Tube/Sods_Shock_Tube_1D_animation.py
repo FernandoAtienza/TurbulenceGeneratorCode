@@ -14,10 +14,13 @@ import scipy.sparse.linalg as spla
 # ------------------------------------------------------------
 gamma = 1.4
 R_gas = 1.0
+rho_floor = 1e-10
+P_floor = 1e-10
 
-# GHOST PADDING
-L_min, L_max = -0.5, 1.5
-nx = 200  
+# The compact operators are periodic. Use a wider padded domain so the
+# artificial periodic discontinuity is far from the validation window [0, 1].
+L_min, L_max = -1.0, 2.0
+nx = 300
 dx = (L_max - L_min) / nx
 dt = 0.0005
 t_end = 0.2
@@ -25,9 +28,13 @@ num_steps = int(t_end / dt)
 
 # Animation Settings
 frames = 100
-steps_per_frame = num_steps // frames
+steps_per_frame = max(1, num_steps // frames)
 
 mn = 0.02  # Hyperviscosity parameter
+hyperviscosity_interval = 5
+sensor_width = 4
+compression_threshold = 2.5
+jump_threshold = 0.035
 x_solve = np.linspace(L_min, L_max - dx, nx)
 
 # Initial conditions (Sod)
@@ -66,6 +73,7 @@ B_hyp = B_hyp_lil.tocsc()
 
 C_hyp_lil = sp.diags([b3_h, a3_h, 1.0, a3_h, b3_h], [-2, -1, 0, 1, 2], shape=(nx, nx)).tolil()
 C_hyp_lil[0, -1] = a3_h; C_hyp_lil[0, -2] = b3_h; C_hyp_lil[1, -1] = b3_h
+C_hyp_lil[-1, 0] = a3_h; C_hyp_lil[-2, 0] = b3_h; C_hyp_lil[-1, 1] = b3_h
 C_hyp_csc = C_hyp_lil.tocsc()
 solve_C_hyp = spla.factorized(C_hyp_csc)
 
@@ -78,6 +86,77 @@ D_hyp = D_hyp_lil.tocsc()
 
 dt_hyp = 5 * dt
 solve_L_hyp = spla.factorized(C_hyp_csc - dt_hyp * mn * D_hyp)
+
+# ============================================================
+# Primitive/Conservative Helpers and Discontinuity Sensor
+# ============================================================
+def primitive_from_conservative(Q_arr):
+    rho_arr = np.maximum(Q_arr[0], rho_floor)
+    u_arr = Q_arr[1] / rho_arr
+    E_arr = Q_arr[2]
+    P_arr = (gamma - 1.0) * (E_arr - 0.5 * rho_arr * u_arr**2)
+    P_arr = np.maximum(P_arr, P_floor)
+    return rho_arr, u_arr, P_arr
+
+def conservative_from_primitive(rho_arr, u_arr, P_arr):
+    Q_arr = np.zeros((3, rho_arr.size))
+    rho_arr = np.maximum(rho_arr, rho_floor)
+    P_arr = np.maximum(P_arr, P_floor)
+    Q_arr[0] = rho_arr
+    Q_arr[1] = rho_arr * u_arr
+    Q_arr[2] = P_arr / (gamma - 1.0) + 0.5 * rho_arr * u_arr**2
+    return Q_arr
+
+def enforce_physical_state(Q_arr):
+    Q_fixed = np.array(Q_arr, copy=True)
+    rho_arr = np.maximum(Q_fixed[0], rho_floor)
+    u_arr = Q_fixed[1] / rho_arr
+    kinetic = 0.5 * rho_arr * u_arr**2
+    P_arr = (gamma - 1.0) * (Q_fixed[2] - kinetic)
+
+    Q_fixed[0] = rho_arr
+    Q_fixed[1] = rho_arr * u_arr
+    Q_fixed[2] = np.where(
+        P_arr > P_floor,
+        Q_fixed[2],
+        P_floor / (gamma - 1.0) + kinetic,
+    )
+    return Q_fixed
+
+def relative_jump_sensor(q_arr):
+    eps = 1e-14 + 1e-12 * np.max(np.abs(q_arr))
+    jump_r = np.abs(np.roll(q_arr, -1) - q_arr) / (np.abs(np.roll(q_arr, -1)) + np.abs(q_arr) + eps)
+    jump_l = np.abs(q_arr - np.roll(q_arr, 1)) / (np.abs(q_arr) + np.abs(np.roll(q_arr, 1)) + eps)
+    curvature = np.abs(np.roll(q_arr, -1) - 2.0 * q_arr + np.roll(q_arr, 1))
+    curvature /= np.abs(np.roll(q_arr, -1)) + 2.0 * np.abs(q_arr) + np.abs(np.roll(q_arr, 1)) + eps
+    return np.maximum.reduce([jump_l, jump_r, curvature])
+
+def dilate_periodic_mask(mask, width):
+    expanded = mask.copy()
+    for k in range(1, width + 1):
+        expanded |= np.roll(mask, k)
+        expanded |= np.roll(mask, -k)
+    return expanded
+
+def discontinuity_mask(Q_arr):
+    rho_arr, u_arr, P_arr = primitive_from_conservative(Q_arr)
+    theta = (np.roll(u_arr, -1) - np.roll(u_arr, 1)) / (2.0 * dx)
+    theta_rms = np.sqrt(np.mean(theta**2))
+    compression = np.zeros_like(theta, dtype=bool)
+    if theta_rms > 1e-12:
+        compression = theta < -compression_threshold * theta_rms
+
+    density_jump = relative_jump_sensor(rho_arr) > jump_threshold
+    pressure_jump = relative_jump_sensor(P_arr) > jump_threshold
+    internal_energy = P_arr / (rho_arr * (gamma - 1.0))
+    energy_jump = relative_jump_sensor(internal_energy) > jump_threshold
+
+    return dilate_periodic_mask(compression | density_jump | pressure_jump | energy_jump, sensor_width)
+
+def interface_masks(node_mask):
+    weno_edge = node_mask | np.roll(node_mask, -1)
+    smooth_edge = ~weno_edge
+    return weno_edge, smooth_edge
 
 # ============================================================
 # WENO-7 Flux Splitting & Operators
@@ -100,34 +179,81 @@ def weno7_flux(v1, v2, v3, v4, v5, v6, v7):
     
     return (alpha0*q0 + alpha1*q1 + alpha2*q2 + alpha3*q3) / sum_alpha
 
-def get_weno7_euler_flux_LLF(Q_arr, F_arr, alpha_local):
+def roe_eigenvectors(Q_left, Q_right):
+    rho_l, u_l, P_l = primitive_from_conservative(Q_left[:, None])
+    rho_r, u_r, P_r = primitive_from_conservative(Q_right[:, None])
+    rho_l, u_l, P_l = rho_l[0], u_l[0], P_l[0]
+    rho_r, u_r, P_r = rho_r[0], u_r[0], P_r[0]
+
+    H_l = (Q_left[2] + P_l) / rho_l
+    H_r = (Q_right[2] + P_r) / rho_r
+    sqrt_l = np.sqrt(rho_l)
+    sqrt_r = np.sqrt(rho_r)
+    denom = sqrt_l + sqrt_r
+
+    u_roe = (sqrt_l * u_l + sqrt_r * u_r) / denom
+    H_roe = (sqrt_l * H_l + sqrt_r * H_r) / denom
+    kinetic = 0.5 * u_roe**2
+    c2 = max((gamma - 1.0) * (H_roe - kinetic), P_floor)
+    c = np.sqrt(c2)
+
+    R = np.array([
+        [1.0, 1.0, 1.0],
+        [u_roe - c, u_roe, u_roe + c],
+        [H_roe - u_roe * c, kinetic, H_roe + u_roe * c],
+    ])
+
+    gm1 = gamma - 1.0
+    L = np.array([
+        [(gm1 * kinetic + u_roe * c) / (2.0 * c2), -(gm1 * u_roe + c) / (2.0 * c2), gm1 / (2.0 * c2)],
+        [1.0 - gm1 * kinetic / c2, gm1 * u_roe / c2, -gm1 / c2],
+        [(gm1 * kinetic - u_roe * c) / (2.0 * c2), -(gm1 * u_roe - c) / (2.0 * c2), gm1 / (2.0 * c2)],
+    ])
+    return L, R
+
+def get_weno7_euler_flux_LLF(Q_arr, F_arr, alpha, required_edges=None):
     F_half = np.zeros_like(Q_arr)
-    for k in range(3):
-        fp = 0.5 * (F_arr[k] + alpha_local * Q_arr[k])
-        fm = 0.5 * (F_arr[k] - alpha_local * Q_arr[k])
-        
-        fp_half = weno7_flux(np.roll(fp,3), np.roll(fp,2), np.roll(fp,1), fp, np.roll(fp,-1), np.roll(fp,-2), np.roll(fp,-3))
-        fm_half = weno7_flux(np.roll(fm,-4), np.roll(fm,-3), np.roll(fm,-2), np.roll(fm,-1), fm, np.roll(fm,1), np.roll(fm,2))
-        
-        F_half[k] = fp_half + fm_half
+    F_plus = 0.5 * (F_arr + alpha * Q_arr)
+    F_minus = 0.5 * (F_arr - alpha * Q_arr)
+    if required_edges is None:
+        indices = range(nx)
+    else:
+        indices = np.flatnonzero(dilate_periodic_mask(required_edges, 1))
+
+    for i in indices:
+        ip1 = (i + 1) % nx
+        L, R = roe_eigenvectors(Q_arr[:, i], Q_arr[:, ip1])
+
+        plus_stencil = np.array([L @ F_plus[:, (i + s) % nx] for s in range(-3, 4)])
+        minus_stencil = np.array([L @ F_minus[:, (i + s) % nx] for s in range(4, -3, -1)])
+
+        flux_char = np.empty(3)
+        for m in range(3):
+            flux_char[m] = (
+                weno7_flux(*plus_stencil[:, m])
+                + weno7_flux(*minus_stencil[:, m])
+            )
+
+        F_half[:, i] = R @ flux_char
+
     return F_half
 
 def RHS_euler_hybrid(Q_curr, shock_mask):
-    rho = np.maximum(Q_curr[0], 1e-8)
-    u = Q_curr[1] / rho
-    E = Q_curr[2]
-    P = np.maximum((gamma - 1) * (E - 0.5 * rho * u**2), 1e-8)
+    Q_safe = enforce_physical_state(Q_curr)
+    rho, u, P = primitive_from_conservative(Q_safe)
+    E = Q_safe[2]
     
-    F_curr = np.zeros_like(Q_curr)
-    F_curr[0] = Q_curr[1]; F_curr[1] = rho * u**2 + P; F_curr[2] = (E + P) * u
+    F_curr = np.zeros_like(Q_safe)
+    F_curr[0] = Q_safe[1]; F_curr[1] = rho * u**2 + P; F_curr[2] = (E + P) * u
     
     c = np.sqrt(gamma * P / rho)
-    alpha_local = np.abs(u) + c
+    alpha = float(np.max(np.abs(u) + c))
     
     a1_c = 25/32; b1_c = 1/20; c1_c = -1/480
-    advection = np.zeros_like(Q_curr)
+    advection = np.zeros_like(Q_safe)
+    weno_edge, smooth_edge = interface_masks(shock_mask)
     
-    F_weno_raw = get_weno7_euler_flux_LLF(Q_curr, F_curr, alpha_local)
+    F_weno_raw = get_weno7_euler_flux_LLF(Q_safe, F_curr, alpha, weno_edge)
     
     for k in range(3):
         f = F_curr[k]
@@ -137,14 +263,9 @@ def RHS_euler_hybrid(Q_curr, shock_mask):
         
         F_weno_hat = alpha1_c * np.roll(F_weno_raw[k], -1) + F_weno_raw[k] + alpha1_c * np.roll(F_weno_raw[k], 1)
         
-        is_shock_edge = shock_mask & np.roll(shock_mask, -1)
-        is_smooth_edge = (~shock_mask) & (~np.roll(shock_mask, -1))
-        is_joint_edge = ~(is_shock_edge | is_smooth_edge)
-        
         F_hybrid = np.empty_like(f)
-        F_hybrid[is_smooth_edge] = F_comp[is_smooth_edge]
-        F_hybrid[is_shock_edge]  = F_weno_hat[is_shock_edge]
-        F_hybrid[is_joint_edge]  = 0.5 * (F_comp[is_joint_edge] + F_weno_hat[is_joint_edge])
+        F_hybrid[smooth_edge] = F_comp[smooth_edge]
+        F_hybrid[weno_edge] = F_weno_hat[weno_edge]
         
         advection[k] = solve_A_adv((F_hybrid - np.roll(F_hybrid, 1)) / dx)
                        
@@ -156,18 +277,21 @@ def apply_semi_implicit_hyperviscosity(u_current, shock_mask):
     D_half_u = (-b3_t * np.roll(u_current, 1) - (a3_t + b3_t) * u_current + (a3_t + b3_t) * np.roll(u_current, -1) + b3_t * np.roll(u_current, -2)) / (dx**2)
     H_half = A_hyp_csc @ solve_C_hyp(D_half_u)
     
-    is_shock_edge = shock_mask & np.roll(shock_mask, -1)
-    is_smooth_edge = (~shock_mask) & (~np.roll(shock_mask, -1))
-    is_joint_edge = ~(is_shock_edge | is_smooth_edge)
+    shock_edge, smooth_edge = interface_masks(shock_mask)
     
     G_mod = np.empty_like(G_half)
-    G_mod[is_smooth_edge] = G_half[is_smooth_edge]
-    G_mod[is_shock_edge] = H_half[is_shock_edge]
-    G_mod[is_joint_edge] = 0.5 * (G_half[is_joint_edge] + H_half[is_joint_edge])
+    G_mod[smooth_edge] = G_half[smooth_edge]
+    G_mod[shock_edge] = H_half[shock_edge]
     
     E = solve_A_hyp(G_mod - np.roll(G_mod, 1))
     rhs_implicit = u_current - dt_hyp * mn * E
     return solve_L_hyp(C_hyp_csc @ rhs_implicit)
+
+def apply_hyperviscosity_to_conserved(Q_curr, shock_mask):
+    Q_visc = np.empty_like(Q_curr)
+    for k in range(3):
+        Q_visc[k] = apply_semi_implicit_hyperviscosity(Q_curr[k], shock_mask)
+    return enforce_physical_state(Q_visc)
 
 # ============================================================
 # Exact Riemann Solver (Dynamic Time)
@@ -214,45 +338,27 @@ def exact_sod_dynamic(x_arr, t):
 # ============================================================
 print("Computing fluid evolution. Please wait...")
 history_Q = []
+history_time = []
 
 for step in range(num_steps):
     if step % steps_per_frame == 0:
         history_Q.append(np.copy(Q))
-
-    rho_curr = np.maximum(Q[0], 1e-8)
-    u_curr = Q[1] / rho_curr
+        history_time.append(step * dt)
     
-    theta = (np.roll(u_curr, -1) - np.roll(u_curr, 1)) / (2 * dx)
-    theta_rms = np.sqrt(np.mean(theta**2))
-    if theta_rms < 1e-8:
-        is_shock_node = np.zeros_like(u_curr, dtype=bool)
-    else:
-        is_shock_node = theta < -3.0 * theta_rms
+    shock_region = discontinuity_mask(Q)
+    Q1 = enforce_physical_state(Q + dt * RHS_euler_hybrid(Q, shock_region))
 
-    shock_region = np.copy(is_shock_node)
-    for k in range(1, 4):  
-        shock_region |= np.roll(is_shock_node, k)
-        shock_region |= np.roll(is_shock_node, -k)
-    
-    Q1 = Q + dt * RHS_euler_hybrid(Q, shock_region)
-    Q2 = 0.75*Q + 0.25*(Q1 + dt * RHS_euler_hybrid(Q1, shock_region))
-    Q  = (1.0/3)*Q + (2.0/3)*(Q2 + dt * RHS_euler_hybrid(Q2, shock_region))
+    shock_region_1 = discontinuity_mask(Q1)
+    Q2 = enforce_physical_state(0.75*Q + 0.25*(Q1 + dt * RHS_euler_hybrid(Q1, shock_region_1)))
 
-    if (step + 1) % 5 == 0:
-        rho = np.maximum(Q[0], 1e-8)
-        u = Q[1] / rho
-        E = Q[2]
-        P = np.maximum((gamma - 1) * (E - 0.5 * rho * u**2), 1e-8)
-        
-        rho_new = apply_semi_implicit_hyperviscosity(rho, shock_region)
-        u_new = apply_semi_implicit_hyperviscosity(u, shock_region)
-        P_new = apply_semi_implicit_hyperviscosity(P, shock_region) 
-        
-        Q[0] = rho_new
-        Q[1] = rho_new * u_new
-        Q[2] = P_new / (gamma - 1) + 0.5 * rho_new * u_new**2
+    shock_region_2 = discontinuity_mask(Q2)
+    Q = enforce_physical_state((1.0/3)*Q + (2.0/3)*(Q2 + dt * RHS_euler_hybrid(Q2, shock_region_2)))
+
+    if (step + 1) % hyperviscosity_interval == 0:
+        Q = apply_hyperviscosity_to_conserved(Q, discontinuity_mask(Q))
 
 history_Q.append(np.copy(Q))  # Append final frame
+history_time.append(num_steps * dt)
 print("Computation complete. Launching animation...")
 
 # ============================================================
@@ -286,7 +392,7 @@ for i, ax in enumerate(axs.flat):
 plt.tight_layout(rect=[0, 0.03, 1, 0.92])
 
 def animate(frame):
-    current_time = frame * steps_per_frame * dt
+    current_time = history_time[frame]
     fig.suptitle(f"Sod's Shock Tube Evolution\nTime = {current_time:.3f} s", fontsize=15, fontweight='bold')
     
     Q_frame = history_Q[frame]
@@ -313,6 +419,6 @@ def animate(frame):
     return lines_exact + scatters_num
 
 # Run the animation
-anim = FuncAnimation(fig, animate, frames=len(history_Q), interval=40, blit=False)
+anim = FuncAnimation(fig, animate, frames=len(history_Q), interval=40, blit=False, repeat=False)
 
 plt.show()
